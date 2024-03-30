@@ -7,7 +7,7 @@ import shutil
 from tensorboardX import SummaryWriter
 from torch import nn, optim
 from torch.nn import functional as F
-from model.mrnn import mrnn
+from model.mrnn import make_model
 from lib.utils import load_stock_data, predict_and_save_results
 
 
@@ -31,18 +31,19 @@ epochs = int(training_config['epochs'])
 stock_data_filename = data_config['stock_data_filename']
 batch_size = int(training_config['batch_size'])
 feature_size = int(training_config['feature_size'])
-units = int(training_config['units'])
-model_name = 'MRNN'
+model_name = training_config['model_name']
 num_for_predict = int(data_config['num_for_predict'])
 num_for_train = int(data_config['num_for_train'])
 intervals = list(map(int, training_config['intervals'].split(',')))
+d_model = int(training_config['d_model'])
+nb_heads = int(training_config['nb_heads'])
 
 params_path = './experiments/%s_%s' % (model_name, stock_data_filename.split('/')[1].split('.')[0])
 
 (train_loader, train_target_tensor, val_loader, val_target_tensor, test_loader,
  test_target_tensor, _max, _min) = load_stock_data(stock_data_filename, DEVICE, batch_size)
 
-model = mrnn(feature_size, units, num_for_train, num_for_predict, intervals).to(DEVICE)
+model = make_model(feature_size, num_for_train, num_for_predict, intervals, d_model, nb_heads).to(DEVICE)
 print(model)
 
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
@@ -91,15 +92,22 @@ def train_main():
 
         model.eval()
         with torch.no_grad():
+            val_loader_length = len(val_loader)
             tmp = []
-            for x1, x2, x3, label in val_loader:
+            for batchIdx, (x1, x2, x3, label) in enumerate(val_loader):
                 x1, x2, x3, label = x1.to(DEVICE), x2.to(DEVICE), x3.to(DEVICE), label.to(DEVICE)
                 x = [x1, x2, x3]
                 out = model(x)
                 loss = F.mse_loss(out, label)
                 tmp.append(loss)
 
+                if batchIdx % 100 == 0:
+                    print('validation batch %s / %s, loss: %.4f' % (batchIdx + 1, val_loader_length, loss.item()))
+
             val_loss = sum(tmp) / len(tmp)
+
+            print('val loss', val_loss)
+
             sw.add_scalar('validation_loss', val_loss, epoch)
 
             if val_loss < best_val_loss:
@@ -137,3 +145,4 @@ def predict_main(epoch, data_loader, data_target_tensor, _max, _min, type):
 
 if __name__ == '__main__':
     train_main()
+    # predict_main(4, test_loader, test_target_tensor, _max, _min, 'test')
