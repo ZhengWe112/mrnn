@@ -106,6 +106,39 @@ class MultiHeadAttention(nn.Module):
         return self.lin(x)
 
 
+class TemporalPositionalEncoding(nn.Module):
+    def __init__(self, d_model, dropout, max_len, lookup_index=None):
+        super(TemporalPositionalEncoding, self).__init__()
+
+        self.dropout = nn.Dropout(p=dropout)
+        self.lookup_index = lookup_index
+        self.max_len = max_len
+        # computing the positional encodings once in log space
+        pe = torch.zeros(max_len, d_model)
+        for pos in range(max_len):
+            for i in range(0, d_model, 2):
+                pe[pos, i] = math.sin(pos / (10000 ** ((2 * i)/d_model)))
+                pe[pos, i+1] = math.cos(pos / (10000 ** ((2 * (i + 1)) / d_model)))
+
+        pe = pe.unsqueeze(0)  # (1, T_max, d_model)
+        self.register_buffer('pe', pe)
+        # register_buffer:
+        # Adds a persistent buffer to the module.
+        # This is typically used to register a buffer that should not to be considered a model parameter.
+
+    def forward(self, x):
+        """
+        :param x: (batch_size, T, F_in)
+        :return: (batch_size, T, F_out)
+        """
+        if self.lookup_index is not None:
+            x = x + self.pe[:, self.lookup_index, :]  # (batch_size, T, F_in) + (1, T, d_model)
+        else:
+            x = x + self.pe[:, :x.size(1), :]
+
+        return self.dropout(x.detach())
+
+
 # granularity feature extraction module
 class gfem(nn.Module):
     def __init__(self, nb_head, d_model, t_train, t_pred, dropout=.0, residual_connection=True, use_layernorm=True):
@@ -141,11 +174,11 @@ class gfem(nn.Module):
 
 # multi-granularity residual neural network
 class mrnn(nn.Module):
-    def __init__(self, gfs, src_dense, align, intervals, generator):
+    def __init__(self, gfs, src_emd, align, intervals, generator):
         super(mrnn, self).__init__()
         self.intervals = intervals
-        self.gfs = gfs
-        self.dense = src_dense
+        self.gfs = gfs  
+        self.emd = src_emd
         self.alignment = align
         self.predict_generator = generator
 
@@ -159,7 +192,7 @@ class mrnn(nn.Module):
         # (b, t[i], f) -> (b, t, f) -> (b, t, d_model)
         for idx, block in enumerate(self.alignment):
             x[idx] = block(x[idx].transpose(-1, -2)).transpose(-1, -2)
-            x[idx] = self.dense(x[idx])
+            x[idx] = self.emd(x[idx])
 
         y_pred, p, refactor = [], x[0], []
         for idx, block in enumerate(self.gfs):
@@ -172,10 +205,17 @@ class mrnn(nn.Module):
         return self.predict_generator(sum(y_pred))
 
 
-def make_model(feature_size, num_for_train, num_for_predict, intervals, d_model, nb_heads):
+def make_model(feature_size, num_for_train, num_for_predict, intervals, d_model, nb_heads, TE=False):
     c = copy.deepcopy
 
+    encode_temporal_position = TemporalPositionalEncoding(d_model, .0, 100)
+
     src_dense = nn.Linear(feature_size, d_model)
+
+    if TE:
+        src_emd = nn.Sequential(src_dense, c(encode_temporal_position))
+    else:
+        src_emd = src_dense
 
     gf = gfem(nb_heads, d_model, num_for_train, num_for_predict)
 
@@ -190,7 +230,7 @@ def make_model(feature_size, num_for_train, num_for_predict, intervals, d_model,
 
     generator = nn.Linear(d_model, feature_size)
 
-    model = mrnn(gfs, src_dense, alignment, intervals, generator)
+    model = mrnn(gfs, src_emd, alignment, intervals, generator)
 
     for p in model.parameters():
         if p.dim() > 1:

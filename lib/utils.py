@@ -87,6 +87,63 @@ def load_stock_data(filename, DEVICE, batchsz):
     return train_loader, train_target_tensor, val_loader, val_target_tensor, test_loader, test_target_tensor, _max, _min
 
 
+def load_data(filename, DEVICE, batchsz, nb_granularity):
+    """
+    loading data and converting to tensor
+    :param filename: str
+    :param DEVICE: torch.device
+    :param batchsz: int
+    :param nb_granularity: int
+    :return:
+        three DataLoaders, each dataloader contains:
+        train_x_tensor: (B, T, F)
+        train_target_tensor: (B, T, F)
+    """
+    print("load file: ", filename)
+
+    file_data = np.load(filename, allow_pickle=True)
+
+    for key, array in file_data.items():
+        print(f"{key}: {array.shape}")
+
+    arrays = list(file_data.values())
+
+    train_set = arrays[0: nb_granularity]
+    val_set = arrays[nb_granularity: 2 * nb_granularity]
+    test_set = arrays[2 * nb_granularity: 3 * nb_granularity]
+    _max = file_data['mean']
+    _min = file_data['std']
+
+    for i in range(len(train_set)):
+        train_set[i] = max_min_normalization(train_set[i], _max[0, 0, i], _min[0, 0, i])
+        train_set[i] = train_set[i].astype(np.float64)
+        train_set[i] = torch.from_numpy(train_set[i]).type(torch.FloatTensor).to(DEVICE)
+
+    train_target_tensor = train_set[-1].to(DEVICE)
+    train_datasets = torch.utils.data.TensorDataset(*train_set)
+    train_loader = torch.utils.data.DataLoader(train_datasets, batch_size=batchsz, shuffle=True)
+
+    for i in range(len(val_set)):
+        val_set[i] = max_min_normalization(val_set[i], _max[0, 0, i], _min[0, 0, i])
+        val_set[i] = val_set[i].astype(np.float64)
+        val_set[i] = torch.from_numpy(val_set[i]).type(torch.FloatTensor).to(DEVICE)
+
+    val_target_tensor = val_set[-1].to(DEVICE)
+    val_datasets = torch.utils.data.TensorDataset(*val_set)
+    val_loader = torch.utils.data.DataLoader(val_datasets, batch_size=batchsz)
+
+    for i in range(len(test_set)):
+        test_set[i] = max_min_normalization(test_set[i], _max[0, 0, i], _min[0, 0, i])
+        test_set[i] = test_set[i].astype(np.float64)
+        test_set[i] = torch.from_numpy(test_set[i]).type(torch.FloatTensor).to(DEVICE)
+
+    test_target_tensor = test_set[-1].to(DEVICE)
+    test_datasets = torch.utils.data.TensorDataset(*test_set)
+    test_loader = torch.utils.data.DataLoader(test_datasets, batch_size=batchsz)
+
+    return train_loader, train_target_tensor, val_loader, val_target_tensor, test_loader, test_target_tensor, _max, _min
+
+
 def predict_and_save_results(model, data_loader, data_target_tensor, epoch, params_path, _max, _min, type):
     """
     predict and save results
@@ -107,16 +164,16 @@ def predict_and_save_results(model, data_loader, data_target_tensor, epoch, para
         data_target_tensor = data_target_tensor.cpu().numpy()
         prediction = []  # prediction value
 
-        for batchIdx, (x1, x2, x3, labels) in enumerate(data_loader):
-            x = [x1, x2, x3]
+        for batchIdx, x in enumerate(data_loader):
+            x.pop()  # 弹出target
             out = model(x)
             prediction.append(out.detach().cpu().numpy())
 
         print('test time on whole data:%.2fs' % (time() - start_time))
 
         prediction = np.concatenate(prediction, 0)  # (S, T, 1)
-        prediction = re_max_min_normalization(prediction, _max[0, 0, 0], _min[0, 0, 0])
-        data_target_tensor = re_max_min_normalization(data_target_tensor, _max[0, 0, 0], _min[0, 0, 0])
+        prediction = re_max_min_normalization(prediction, _max[0, 0, 5], _min[0, 0, 5])
+        data_target_tensor = re_max_min_normalization(data_target_tensor, _max[0, 0, 5], _min[0, 0, 5])
 
         print('prediction:', prediction.shape)
         print('data_target_tensor:', data_target_tensor.shape)
@@ -142,11 +199,11 @@ def predict_and_save_results(model, data_loader, data_target_tensor, epoch, para
         rmse = mean_squared_error(data_target_tensor.reshape(-1, 1), prediction.reshape(-1, 1)) ** 0.5
         mape = masked_mape_np(data_target_tensor.reshape(-1, 1), prediction.reshape(-1, 1), 0)
         corr = np.corrcoef(data_target_tensor.reshape(-1), prediction.reshape(-1))[0, 1]
-        print('all MAE: %.2f' % mae)
-        print('all RMSE: %.2f' % rmse)
-        print('all MAPE: %.2f' % mape)
-        print('all CORR: %.2f' % corr)
-        excel_list.extend([mae, rmse, mape])
+        print('all MAE: %.4f' % mae)
+        print('all RMSE: %.4f' % rmse)
+        print('all MAPE: %.4f' % mape)
+        print('all CORR: %.4f' % corr)
+        excel_list.extend([mae, rmse, mape, corr])
         print(excel_list)
 
 
@@ -171,7 +228,7 @@ def predict_and_save_results_without_granularity(model, data_loader, data_target
         prediction = []  # prediction value
 
         for batchIdx, (x, _, __, labels) in enumerate(data_loader):
-            xt, yt = model(x)
+            yt = model(x)
             prediction.append(yt.detach().cpu().numpy())
 
         print('test time on whole data:%.2fs' % (time() - start_time))
@@ -189,23 +246,14 @@ def predict_and_save_results_without_granularity(model, data_loader, data_target
         excel_list = []
         prediction_length = prediction.shape[1]
 
-        for i in range(prediction_length):
-            assert data_target_tensor.shape[0] == prediction.shape[0]
-
-            mae = mean_absolute_error(data_target_tensor[:, i], prediction[:, i])
-            rmse = mean_squared_error(data_target_tensor[:, i], prediction[:, i]) ** 0.5
-            mape = masked_mape_np(data_target_tensor[:, i], prediction[:, i], 0)
-            print('MAE: %.6f' % mae)
-            print('RMSE: %.6f' % rmse)
-            print('MAPE: %.6f' % mape)
-            excel_list.extend([mae, rmse, mape])
-
         # print overall results
         mae = mean_absolute_error(data_target_tensor.reshape(-1, 1), prediction.reshape(-1, 1))
         rmse = mean_squared_error(data_target_tensor.reshape(-1, 1), prediction.reshape(-1, 1)) ** 0.5
         mape = masked_mape_np(data_target_tensor.reshape(-1, 1), prediction.reshape(-1, 1), 0)
-        print('all MAE: %.2f' % mae)
-        print('all RMSE: %.2f' % rmse)
-        print('all MAPE: %.2f' % mape)
-        excel_list.extend([mae, rmse, mape])
+        corr = np.corrcoef(data_target_tensor.reshape(-1), prediction.reshape(-1))[0, 1]
+        print('all MAE: %.4f' % mae)
+        print('all RMSE: %.4f' % rmse)
+        print('all MAPE: %.4f' % mape)
+        print('all CORR: %.4f' % corr)
+        excel_list.extend([mae, rmse, mape, corr])
         print(excel_list)

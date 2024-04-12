@@ -8,7 +8,7 @@ from tensorboardX import SummaryWriter
 from torch import nn, optim
 from torch.nn import functional as F
 from model.mrnn import make_model
-from lib.utils import load_stock_data, predict_and_save_results
+from lib.utils import load_data, predict_and_save_results
 
 
 parser = argparse.ArgumentParser()
@@ -37,11 +37,12 @@ num_for_train = int(data_config['num_for_train'])
 intervals = list(map(int, training_config['intervals'].split(',')))
 d_model = int(training_config['d_model'])
 nb_heads = int(training_config['nb_heads'])
+nb_granularity = int(training_config['granularity'])
 
 params_path = './experiments/%s_%s' % (model_name, stock_data_filename.split('/')[1].split('.')[0])
 
 (train_loader, train_target_tensor, val_loader, val_target_tensor, test_loader,
- test_target_tensor, _max, _min) = load_stock_data(stock_data_filename, DEVICE, batch_size)
+ test_target_tensor, _max, _min) = load_data(stock_data_filename, DEVICE, batch_size, nb_granularity+1)
 
 model = make_model(feature_size, num_for_train, num_for_predict, intervals, d_model, nb_heads).to(DEVICE)
 print(model)
@@ -78,9 +79,8 @@ def train_main():
         # train
         model.train()
         print(f'epoch: {epoch}')
-        for batchIdx, (x1, x2, x3, label) in enumerate(train_loader):
-            x1, x2, x3, label = x1.to(DEVICE), x2.to(DEVICE), x3.to(DEVICE), label.to(DEVICE)
-            x = [x1, x2, x3]
+        for batchIdx, x in enumerate(train_loader):
+            label = x.pop()  # x的最后一个是target 其它是输入
             out = model(x)
             loss = criterion(out, label)
             optimizer.zero_grad()
@@ -94,12 +94,11 @@ def train_main():
         with torch.no_grad():
             val_loader_length = len(val_loader)
             tmp = []
-            for batchIdx, (x1, x2, x3, label) in enumerate(val_loader):
-                x1, x2, x3, label = x1.to(DEVICE), x2.to(DEVICE), x3.to(DEVICE), label.to(DEVICE)
-                x = [x1, x2, x3]
+            for batchIdx, x in enumerate(val_loader):
+                label = x.pop()
                 out = model(x)
                 loss = F.mse_loss(out, label)
-                tmp.append(loss)
+                tmp.append(loss.item())
 
                 if batchIdx % 100 == 0:
                     print('validation batch %s / %s, loss: %.4f' % (batchIdx + 1, val_loader_length, loss.item()))
@@ -115,6 +114,8 @@ def train_main():
                 best_val_loss = val_loss
                 best_epoch = epoch
                 torch.save(model.state_dict(), params_filename)
+                print('best epoch: ', best_epoch)
+                print('best val loss: ', best_val_loss)
                 print('save parameters to file: %s' % params_filename, flush=True)
 
     print('best epoch:', best_epoch, flush=True)
@@ -145,4 +146,4 @@ def predict_main(epoch, data_loader, data_target_tensor, _max, _min, type):
 
 if __name__ == '__main__':
     train_main()
-    # predict_main(4, test_loader, test_target_tensor, _max, _min, 'test')
+    # predict_main(1, test_loader, test_target_tensor, _max, _min, 'test')

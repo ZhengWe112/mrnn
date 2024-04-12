@@ -1,30 +1,21 @@
 import numpy as np
-from sklearn.metrics import mean_squared_error
+import torch
+from sklearn.metrics import mean_squared_error, mean_absolute_error
 from statsmodels.tsa.arima.model import ARIMA
+from lib.metrics import masked_mape_np
+from lib.integrated_functions import growth_rate
 
-def min_max_normalization(x1, x2, x3, target):
-    """
-    :param x1: np.ndarray
-    :param x2: np.ndarray
-    :param x3: np.ndarray
-    :param target: np.ndarray
-    :return:
-        stats: dict, two keys: mean and std
-        tensor_norm: np.ndarray
-    """
-    _max = x1.max(axis=(0, 1), keepdims=True)
-    _min = x1.min(axis=(0, 1), keepdims=True)
 
-    def normalize(x):
-        x = 1. * (x - _min) / (_max - _min)
-        x = 2. * x - 1.
-        return x
+def max_min_normalization(x, _max, _min):
+    x = 1. * (x - _min)/(_max - _min)
+    x = x * 2. - 1.
+    return x
 
-    x1_norm = normalize(x1)
-    x2_norm = normalize(x2)
-    x3_norm = normalize(x3)
-    target_norm = normalize(target)
-    return x1_norm, x2_norm, x3_norm, target_norm
+
+def re_max_min_normalization(x, _max, _min):
+    x = (x + 1.) / 2.
+    x = 1. * x * (_max - _min) + _min
+    return x
 
 
 filename = "../data/stock_data_y2016_g3_d_1_4_48_t64_p1.npz"
@@ -45,27 +36,38 @@ test_x2 = file_data['test_x2']
 test_x3 = file_data['test_x3']
 test_target = file_data['test_target']
 
-train_x1, train_x2, train_x3, train_target = min_max_normalization(train_x1, train_x2, train_x3, train_target)
-val_x1, val_x2, val_x3, val_target = min_max_normalization(val_x1, val_x2, val_x3, val_target)
-test_x1, test_x2, test_x3, test_target = min_max_normalization(test_x1, test_x2, test_x3, test_target)
+_max = file_data['mean']
+_min = file_data['std']
+
+test_x1 = max_min_normalization(test_x1, _max[0, 0, 0], _min[0, 0, 0])
+test_target = max_min_normalization(test_target, _max[0, 0, 0], _min[0, 0, 0])
+
+test_target = test_target[0:8000, :, :]
 
 print(val_x1.shape)
-tmp = []
+prediction = []
 
-for s in range(val_x1.shape[0]):
+for s in range(8000):
     print(s)
-    data_flat = val_x1[s].flatten()
-    target_flat = val_target[s].flatten()
+    data_flat = test_x1[s].flatten()
     model = ARIMA(data_flat, order=(3, 3, 1))
     model_fit = model.fit()
 
     n_forecast = 1
     forecast = model_fit.forecast(steps=n_forecast)
 
-    loss = mean_squared_error(target_flat, forecast)
-    tmp.append(loss)
+    prediction.append(forecast)  # (48)
 
+prediction = np.concatenate(prediction, 0)  # (S, 48)
 
-print(sum(tmp) / len(tmp))
-# stock_data_y2016_g3_d_1_4_48          0.35200548491236533
-# stock_data_y2016_g3_d_1_4_48_t64_p1   0.0011552321697535755
+prediction = re_max_min_normalization(prediction, _max[0, 0, 0], _min[0, 0, 0])
+data_target_tensor = re_max_min_normalization(test_target, _max[0, 0, 0], _min[0, 0, 0])
+
+mae = mean_absolute_error(data_target_tensor.reshape(-1, 1), prediction.reshape(-1, 1))
+rmse = mean_squared_error(data_target_tensor.reshape(-1, 1), prediction.reshape(-1, 1)) ** 0.5
+mape = masked_mape_np(data_target_tensor.reshape(-1, 1), prediction.reshape(-1, 1), 0)
+corr = np.corrcoef(data_target_tensor.reshape(-1), prediction.reshape(-1))[0, 1]
+print('all MAE: %.4f' % mae)
+print('all RMSE: %.4f' % rmse)
+print('all MAPE: %.4f' % mape)
+print('all CORR: %.4f' % corr)
